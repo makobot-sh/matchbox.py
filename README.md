@@ -6,7 +6,7 @@ The `printEvidence`, `printConfigs` and `printLatent` methods are provided to ob
 
 ## Experiments
 The code to reproduce the experiment results presented in my thesis work **for our implementation of the Matchbox algorithm** can be found in the follwing branches:
-- `matchbox_binario_propio` code to reproduce 100k rating runs with both synthetic and MovieLens datasets.
+- `matchbox_propio_binario` code to reproduce 100k rating runs with both synthetic and MovieLens datasets.
 - `optimizacion` code to reproduce experiment where message 7 is replaced by the gaussian that minimizes reverse KL divergence with exact posterior.
 - `pruebas_umbrales` code to reproduce table where threshold model is shown to "leak" evidence when there's more than one threshold.
 - `recs-con-sin-convergencia` code to reproduce results shown in *Smoothing* example from section *2.1.3 Propagación en el tiempo*.

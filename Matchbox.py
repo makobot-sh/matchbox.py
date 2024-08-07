@@ -9,9 +9,24 @@ import copy
 from tqdm import tqdm
 import pickle
 from datetime import datetime
-import random 
+import matplotlib.pyplot as plt
+from scipy.stats import norm
+import os
+from enum import Enum
+import time
+import torch
+from torch.distributions.normal import Normal as tNormal
 
 assert sys.version_info >= (3, 9), "Use Python 3.9 or newer"
+
+class ApproximationAlgorithm(Enum):
+    """Possible algorithms for approximating messages
+
+    MATCHBOX -- proposed approximation by Matchbox paper
+    MINKL -- Gaussian which minimizes KL(q||p) divergence with respect to exact posterior of user/item variables
+    """
+    MATCHBOX = 1
+    MINKL = 2
 
 class symmbreakdefaultdict(defaultdict):
     traitCount: int = None
@@ -75,6 +90,8 @@ class Matchbox:
     ratingHistory -- array containing all ratings the recommender has observed in the order they were added.
     logEvidence -- sum of logarithms of first predictions ('s probabilities) for observed ratings. Not updated during convergence.
     logEvidenceHistory -- array containing log of predictions ('s probabilities) for observed ratings, updated during convergence.
+    sevenApproxAlgorithm -- one of possible ApproximationAlgorithm s for message seven. Defaults to ApproximationAlgorithm.MINKL
+    userIdForMessageSevenPlot -- int or None. If set to int value, a plot will be created and saved of possible message 7 whenever given userId participates of currently observed event  
     """
     traitCount: int
     numThresholds: int
@@ -89,6 +106,8 @@ class Matchbox:
     ratingHistory: list[RatingEvent]
     logEvidence: float
     logEvidenceHistory: list[float]
+    sevenApproxAlgorithm: ApproximationAlgorithm
+    userIdForMessageSevenPlot: int | None
 
     def __init__(self, traitCount=2, numThresholds=1, betaNoise2=1, biasNoise2=0, tauNoise2=0):
         self._traitCount = traitCount
@@ -105,6 +124,8 @@ class Matchbox:
         self.logEvidence = 0
         self.ratingHistory = []
         self.logEvidenceHistory = []
+        self.sevenApproxAlgorithm = ApproximationAlgorithm.MINKL
+        self.userIdForMessageSevenPlot = None
 
     def _initUDefaultDict(self):
         return [Gaussian(0,1) for _ in range(self.traitCount)]
@@ -147,22 +168,17 @@ class Matchbox:
         self.logEvidence += pred
         self.logEvidenceHistory.append(pred)
 
-    def convergeModel(self, picklePath=None, it_start=0, i_start=0) -> None:
+    def convergeModel(self, picklePath=None) -> None:
         """Propagate rating information through the model by re-observing all ratings in the rating history until all latent trait marginals converge."""
         if len(self.ratingHistory) < 2:
             return
         print(f"Convergiendo evento {len(self.ratingHistory)-1}")
         convergence = False
-        it = it_start
+        it = 0
         ubias_old = copy.deepcopy(self.ubias)
         while (not (convergence or it>=5)):
             print(f"========== History it. {it} ==========")
-            if it > it_start:
-                i_st = 0
-            else:
-                i_st = i_start
-            for i, evt in enumerate(tqdm(self.ratingHistory,initial=i_st)):
-                userId = evt.r[0]
+            for i, evt in enumerate(tqdm(self.ratingHistory)):
                 self.unviewRating(evt)
                 likelihoods_and_pred = self._rateAndUpdatePriors(*evt.r)
                 self.ratingHistory[i] = RatingEvent(evt.r, *likelihoods_and_pred[:-1])
@@ -171,12 +187,11 @@ class Matchbox:
                 #convergence = all(msg.estimationsConverge(uki,nuki) for uk, nuk in zip(ubias_old.values(), self.ubias.values()) for uki, nuki in zip(uk, nuk))
                 convergence = all(msg.estimationsConverge(uki,nuki) for uki, nuki in zip(ubias_old.values(), self.ubias.values()))
                 #print("\n".join([f"{k}: {ubias_old[k]} || {kn}: {self.ubias[kn]}" for k,kn in zip(ubias_old.keys(), self.ubias.keys())]))
-                ubias_old[userId] = self.ubias[userId] #copy updated ubias to check convergence in next step
-                if picklePath is not None and i%1000==0:
+                ubias_old = copy.deepcopy(self.ubias)
+                if picklePath is not None and i%10000==0:
                     self.save(f"{picklePath}_it{it}_i{i}.p")
             it += 1
-            if picklePath is not None:
-                self.save(f"{picklePath}_it{it}_i{i}.p")
+            self.save(f"{picklePath}_it{it}_i{i}.p")
             print(f"| Ev geo mean  |{f'{self.geoMeanEvidence():.5f}':^11}|{f'{self.geoMeanConvergedEvidence():.5f}':^11}|")
 
     def unviewRating(self, e: RatingEvent) -> None:
@@ -192,7 +207,7 @@ class Matchbox:
     @staticmethod
     def dictDiv(source: dict[int, any], div: RatingEvent, k: int):
         if isinstance(source[k], list): # for nested [int, list[Gaussian]] dict
-            source[k] = [sk/dk for sk,dk in zip(source[k],div)]
+            source[k] = [sk/dk if not isinstance(sk, PointMass) else sk for sk,dk in zip(source[k],div)]
         else: # for [int, Gaussian] dict
             source[k] = source[k]/div
 
@@ -203,7 +218,17 @@ class Matchbox:
         movieBiasPrior = self.vbias[movieId]
         thrPrior = self.U_thr[userId]
         biasPrior = msg.one_bias(userBiasPrior, movieBiasPrior)
-        userLhood, movieLhood, biasLhood, thrLhood, pred = self._rate(userPrior, moviePrior, biasPrior, thrPrior, rating)
+        plotSeven = self.userIdForMessageSevenPlot is not None and userId == self.userIdForMessageSevenPlot
+
+        userLhood, movieLhood, biasLhood, thrLhood, pred = self._rate(userPrior, moviePrior, biasPrior, thrPrior, rating, returnSevenPlotData=plotSeven)
+        
+        userPrior = [Gaussian(mu=0.0000, sigma=0.06592773026326441), Gaussian(mu=0.0000, sigma=0.06592773026326441), Gaussian(mu=0.0000, sigma=0.06592773026326441), Gaussian(mu=0.0000, sigma=0.06592773026326441)]
+        userLhood = [Gaussian(mu=-0.0000, sigma=-0.06847201855481548), Gaussian(mu=-0.0000, sigma=-0.06847201855481548), Gaussian(mu=-0.0000, sigma=-0.06847201855481548), Gaussian(mu=-0.0000, sigma=-0.06847201855481548)]
+
+        if plotSeven:
+            self.plotMessageSeven(1,userPrior,*userLhood)
+            userLhood = userLhood[2] # Don't need the rest of the information anymore
+
         self.U[userId] = [margUki * m8uki for margUki, m8uki in zip(userPrior, userLhood)] #New prior (uki marginal probability, prior * msg8)
         self.V[movieId] = [margVki * m8vki for margVki, m8vki in zip(moviePrior, movieLhood)] #idem uki
         userBiasLhood = msg.lhood_subjectBias(biasLhood, self.vbias[movieId])
@@ -219,8 +244,9 @@ class Matchbox:
               tk: list[Gaussian], 
               b: Gaussian, 
               user_thr: list[Gaussian], 
-              rObs: float
-              ) -> tuple[list[Gaussian], list[Gaussian], list[Gaussian], Gaussian]:
+              rObs: float,
+              returnSevenPlotData: bool=False
+              ) -> tuple[list[Gaussian] | tuple[list[Gaussian]], list[Gaussian], list[Gaussian], Gaussian]:
         convergence = False
         it = 0
         firstPred = 0
@@ -238,19 +264,72 @@ class Matchbox:
             m5, thrLhood, prs = msg.five(newRating, rObs, priorThr, self.tauNoise2, plot=False)
             m5p = Gaussian(m5.mu, math.sqrt(m5.sigma2+self.betaNoise2))
             m6 = msg.six(m5p, b1, m2)
-            m7S = msg.seven(m6, tk1) #m7 is posterior in collaborative filtering, but truthfully the posterior is msg8. msg7 is missing substracting other "active" columns like substracting vb for ub bias posterior
-            m7T = msg.seven(m6, sk1)
+
+            if (self.sevenApproxAlgorithm is ApproximationAlgorithm.MINKL or returnSevenPlotData) and it==0:
+                # MINKL doesn't require iteration, so we only run it once.
+                # If returnSevenPlotData is True we want the results for both algorithms, so on it=0 we run both and from it=1 onwards we run only MATCHBOX
+                exactS, m7S = msg.sevenMinKl(m6, tk1, sk)
+                print(f"m7 minkl: {m7S}")
+                #exactS, m7S = msg.sevenMinKl([Gaussian(3,1) for _ in range(len(m6))], [Gaussian(1,1) for _ in range(len(tk1))], [Gaussian(0,2) for _ in range(len(sk))])
+                _, m7T = msg.sevenMinKl(m6, sk1, tk)
+                m7S_min = (exactS, m7S) 
+                if returnSevenPlotData:
+                    # overwrite m7S with matchbox algo
+                    m7S = msg.seven(m6, tk1)
+            else:
+                # We fall here when either
+                #   case 1: approx. algorithm is MATCHBOX
+                #   case 2: returnSevenPlotData is True and it > 0
+                m7S = msg.seven(m6, tk1)
+                m7T = msg.seven(m6, sk1) 
             
+
             # Chequeo convergencia
             if it==0:
-                firstPreds = prs
-                #print(f"{sum(firstPreds)}: {firstPreds}")
                 firstPred = math.log(prs[rObs])
-            convergence = abs(math.log(prs[rObs]) - pr_old)<0.00000001; pr_old = math.log(prs[rObs])
+            convergence = abs(math.log(prs[rObs]) - pr_old)<0.00000001
+
+            if not (returnSevenPlotData or self.sevenApproxAlgorithm is ApproximationAlgorithm.MATCHBOX):
+                # No need to iterate if we don't care about the matchbox proposed approximation,
+                # which only matters if it was the selected approximation algorithm or we're plotting message 7 (returnSevenPlotData=True)
+                convergence = True 
+            pr_old = math.log(prs[rObs])
             it += 1
-        #print(f"sum: {sum(firstPreds)}, [{', '.join(f'{q:.5f}' for q in firstPreds)}]")
+
         posteriorb = msg.seven_bias(m5p, m2, self.biasNoise2)
+
+        if returnSevenPlotData:
+            m7S = (m7S_min[0],m7S,m7S_min[1]) #Exact message 7, matchbox proposed approx., gaussian that minimizes kl with posterior
+        #print(f"sum: {sum(firstPreds)}, [{', '.join(f'{q:.5f}' for q in firstPreds)}]")
+        print(f"msg 7S: {m7S}")
+        print(f"msg 7T: {m7T}")
         return (m7S, m7T, posteriorb, thrLhood, firstPred)     
+
+    def plotMessageSeven(self, 
+                         k:int,
+                         userPrior:list[Gaussian], 
+                         exact_msg_7:list[Gaussian], 
+                         matchbox_msg_7:list[Gaussian], 
+                         minkl_msg_7:list[Gaussian], 
+                         plotName:str="TEST/posterior.pdf"
+                         ) -> None:
+        step = 0.025
+        mult = int(1/step)
+        grid = [x/mult for x in range(-19*mult,19*mult+1,1)]
+        
+        posterior_exact = [up*m8 for up, m8 in zip(userPrior[k].eval(grid), exact_msg_7[k])]
+        posterior_exact = msg.normalize(posterior_exact, 1)
+        
+        posterior_approx = msg.normalize((userPrior[k]*matchbox_msg_7[k]).eval(grid),1)
+        posterior_min = msg.normalize(minkl_msg_7[k].eval(grid),1)
+        
+        fig = plt.figure()
+        plt.plot(grid, posterior_exact, label="Exact m8 posterior", alpha=0.4)
+        plt.plot(grid, posterior_approx, label="Matchbox m7", alpha=0.6)
+        plt.plot(grid, posterior_min , label="KL(q||p)")
+        plt.legend(loc="upper left", fontsize=10)
+        fig.savefig(plotName, bbox_inches = 'tight')
+        os.system(f"pdfcrop -m '0 0 0 0' {plotName} {plotName}")
 
     def geoMeanEvidence(self) -> float:
         """Evidence made of predictions when ratings were first observed."""
@@ -260,6 +339,17 @@ class Matchbox:
         """Evidence made of predictions when ratings were last observed (aka evidence of observations after convergence)."""
         return math.exp(sum(self.logEvidenceHistory)/len(self.logEvidenceHistory))
 
+    def printConfigs(self):
+        configs = {"traitCount": self.traitCount,
+        "numThresholds": self.numThresholds,
+        "betaNoise2": self.betaNoise2,
+        "biasNoise2": self.biasNoise2,
+        "tauNoise2": self.tauNoise2,
+        "sevenApproxAlgorithm": self.sevenApproxAlgorithm,
+        "userIdForMessageSevenPlot": self.userIdForMessageSevenPlot
+        }
+        print(configs)
+
     def printEvidence(self):
         """Print evidence and geometric mean, both of first observations and updated with convergence."""
         print()
@@ -268,15 +358,6 @@ class Matchbox:
         print(f"| log(evid) |{f'{self.logEvidence:.5f}':^11}|{f'{sum(self.logEvidenceHistory):.5f}':^11}|")
         print(f"| geo mean  |{f'{self.geoMeanEvidence():.5f}':^11}|{f'{self.geoMeanConvergedEvidence():.5f}':^11}|")
         print()
-
-    def printConfigs(self):
-        configs = {"traitCount": self.traitCount,
-        "numThresholds": self.numThresholds,
-        "betaNoise2": self.betaNoise2,
-        "biasNoise2": self.biasNoise2,
-        "tauNoise2": self.tauNoise2
-        }
-        print(configs)
 
     def printLatent(self, numUsers=math.inf, numItems=math.inf):
         """Print latent user and item variables (traits, bias, threhsolds)."""
@@ -310,32 +391,29 @@ class Matchbox:
             i+=1
 
 if __name__ == "__main__":
-    # Some example code
     recommender = Matchbox()
     recommender.traitCount = 4
-    recommender.numThresholds = 4
-    recommender.printConfigs()
+    recommender.numThresholds = 1
+    recommender.trainLine = 0
+    recommender.testLine = 0
+
+    recommender.sevenApproxAlgorithm = ApproximationAlgorithm.MINKL
     now = datetime.now().strftime("%d%m%Y_%H-%M")
-    print("Training...")
-    with open("data/MovieLens/ml-100k-binary/ratings_train.csv", "r") as f:
-        for line in tqdm(f.readlines(),initial=0,total=75000):
+    picklePath = f"src/maca/temp/75k_{now}.p"
+    with open("data/MovieLens_binary_100k/ratings_train.csv", "r") as f:
+        for line in tqdm(f.readlines()[recommender.trainLine:],total=75000-recommender.trainLine):
             l = line.split(",")
             recommender.addRating(int(l[0]),int(l[1]),int(l[2]))
+            if recommender.trainLine % 169 == 0:
+                recommender.save(f"{picklePath[:-2]}_training_{recommender.trainLine}.p")
+            recommender.trainLine += 1
+    recommender.save(f"{picklePath[:-2]}_trained.p")
     recommender.printConfigs()
     recommender.printEvidence()
-    recommender.convergeModel()
-    recommender.printEvidence()
-
-    print("Testing...")
-    with open("data/MovieLens/ml-100k-binary/ratings_test.csv", "r") as f:
-        for line in tqdm(f.readlines(),initial=0,total=25000):
-            l = line.split(",")
-            recommender.addRating(int(l[0]),int(l[1]),int(l[2]))
-    recommender.printConfigs()
-    recommender.printEvidence()
-
-    print("Converging...")
-    recommender.convergeModel()
+    recommender.convergeModel(picklePath=f"{picklePath[:-2]}_converging")
+    recommender.save(f"{picklePath[:-2]}_converged.p")
+    #recommender.printLatent(numUsers=5, numItems=5)
     print("After convergence")
     recommender.printConfigs()
-    recommender.printEvidence()
+    recommender.printEvidence()    
+    

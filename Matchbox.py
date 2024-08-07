@@ -317,7 +317,7 @@ if __name__ == "__main__":
     recommender.printConfigs()
     now = datetime.now().strftime("%d%m%Y_%H-%M")
     print("Training...")
-    with open("data/MovieLens_binary_100k/ratings_train.csv", "r") as f:
+    with open("data/MovieLens/ml-100k-binary/ratings_train.csv", "r") as f:
         for line in tqdm(f.readlines(),initial=0,total=75000):
             l = line.split(",")
             recommender.addRating(int(l[0]),int(l[1]),int(l[2]))
@@ -327,7 +327,7 @@ if __name__ == "__main__":
     recommender.printEvidence()
 
     print("Testing...")
-    with open("data/MovieLens_binary_100k/ratings_test.csv", "r") as f:
+    with open("data/MovieLens/ml-100k-binary/ratings_test.csv", "r") as f:
         for line in tqdm(f.readlines(),initial=0,total=25000):
             l = line.split(",")
             recommender.addRating(int(l[0]),int(l[1]),int(l[2]))

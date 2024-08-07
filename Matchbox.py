@@ -310,32 +310,45 @@ class Matchbox:
             i+=1
 
 if __name__ == "__main__":
-    # Some example code
     recommender = Matchbox()
     recommender.traitCount = 4
-    recommender.numThresholds = 4
+    recommender.numThresholds = 1
+    recommender.trainLine = 0
+    recommender.testLine = 0
     recommender.printConfigs()
     now = datetime.now().strftime("%d%m%Y_%H-%M")
-    print("Training...")
-    with open("data/MovieLens/ml-100k-binary/ratings_train.csv", "r") as f:
-        for line in tqdm(f.readlines(),initial=0,total=75000):
+    picklePath = f"src/maca/temp/synth/75k_synth_{now}.p"
+    with open("data/Simulation/tutorial_synth/100k-binary/ratings_train.csv", "r") as f:
+        for line in tqdm(f.readlines()[recommender.trainLine:],initial=recommender.trainLine,total=75000-recommender.trainLine):
             l = line.split(",")
             recommender.addRating(int(l[0]),int(l[1]),int(l[2]))
+            if recommender.trainLine % 1000 == 0:
+                recommender.save(f"{picklePath[:-2]}_training_{recommender.trainLine}.p")
+            recommender.trainLine += 1
+    recommender.save(f"{picklePath[:-2]}_trained.p")
     recommender.printConfigs()
     recommender.printEvidence()
-    recommender.convergeModel()
+    recommender.convergeModel(picklePath=f"{picklePath[:-2]}_train_converging")
+    recommender.save(f"{picklePath[:-2]}_train_converged.p")
     recommender.printEvidence()
 
-    print("Testing...")
-    with open("data/MovieLens/ml-100k-binary/ratings_test.csv", "r") as f:
-        for line in tqdm(f.readlines(),initial=0,total=25000):
+    print("Testeando...")
+    picklePath = f"src/maca/temp/synth/25k_synth_{now}.p"
+    with open("data/Simulation/tutorial_synth/100k-binary/ratings_test.csv", "r") as f:
+        for line in tqdm(f.readlines()[recommender.testLine:],initial=recommender.testLine,total=25000-recommender.testLine):
             l = line.split(",")
             recommender.addRating(int(l[0]),int(l[1]),int(l[2]))
+            if recommender.testLine % 1000 == 0:
+                recommender.save(f"{picklePath[:-2]}_testing_{recommender.testLine}.p")
+            recommender.testLine += 1
+    recommender.save(f"{picklePath[:-2]}_tested.p")
     recommender.printConfigs()
     recommender.printEvidence()
-
-    print("Converging...")
-    recommender.convergeModel()
+    recommender.convergeModel(picklePath=f"{picklePath[:-2]}_test_converging")
+    recommender.save(f"{picklePath[:-2]}_test_converged.p")      
+    #recommender.printLatent(numUsers=5, numItems=5)
     print("After convergence")
     recommender.printConfigs()
     recommender.printEvidence()
+
+
